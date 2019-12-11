@@ -261,8 +261,8 @@ public class PendingBlockStore implements Closeable {
 
             // save data to disk
             indexSource.commitBatch();
-            levelSource.flushBatch();
-            queueSource.flushBatch();
+            levelSource.commit();
+            queueSource.commit();
 
             // the number of blocks added
             return stored;
@@ -310,7 +310,7 @@ public class PendingBlockStore implements Closeable {
         }
 
         levelData.add(currentQueueHash);
-        levelSource.putToBatch(levelKey, levelData);
+        levelSource.put(levelKey, levelData);
 
         // index block with queue hash
         indexSource.putToBatch(first.getHash(), currentQueueHash);
@@ -350,7 +350,7 @@ public class PendingBlockStore implements Closeable {
         }
 
         // done with queue
-        queueSource.putToBatch(currentQueueHash, currentQueue);
+        queueSource.put(currentQueueHash, currentQueue);
 
         // the number of blocks added
         return stored;
@@ -470,7 +470,7 @@ public class PendingBlockStore implements Closeable {
                 }
 
                 // delete queue
-                queueSource.deleteInBatch(q.toBytes());
+                queueSource.delete(q.toBytes());
             }
 
             // update level
@@ -493,17 +493,17 @@ public class PendingBlockStore implements Closeable {
 
                 if (updatedLevelData.isEmpty()) {
                     // delete level
-                    levelSource.deleteInBatch(levelKey);
+                    levelSource.delete(levelKey);
                 } else {
                     // update level
-                    levelSource.putToBatch(levelKey, updatedLevelData);
+                    levelSource.put(levelKey, updatedLevelData);
                 }
             }
 
             // push changed to disk
             indexSource.commitBatch();
-            queueSource.flushBatch();
-            levelSource.flushBatch();
+            queueSource.commit();
+            levelSource.commit();
         } catch (Exception e) {
             LOG.error("Unable to delete used blocks due to: ", e);
         } finally {
