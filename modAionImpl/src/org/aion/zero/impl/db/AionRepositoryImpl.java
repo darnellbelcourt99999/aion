@@ -219,7 +219,6 @@ public class AionRepositoryImpl extends AbstractRepository {
         }
     }
 
-    @Override
     public void flush() {
         if (LOG.isDebugEnabled()) {
             LOG.debug("------ FLUSH ON " + this.toString());
