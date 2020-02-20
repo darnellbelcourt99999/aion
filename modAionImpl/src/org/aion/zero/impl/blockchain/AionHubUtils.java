@@ -35,7 +35,7 @@ public class AionHubUtils {
             track.createAccount(addr);
             track.addBalance(addr, genesis.getPremine().get(addr).getBalance());
         }
-        track.flush();
+        track.flushTo(repository, true);
 
         repository.commitBlock(genesis.getHashWrapper(), genesis.getNumber(), genesis.getStateRoot());
         repository.getBlockStore().saveBlock(genesis, genesis.getDifficultyBI(), true);
