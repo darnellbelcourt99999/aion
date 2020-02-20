@@ -7,6 +7,7 @@ import org.aion.fastvm.FastVmResultCode;
 import org.aion.fastvm.FastVmTransactionResult;
 import org.aion.fastvm.FvmDataWord;
 import org.aion.fastvm.IExternalStateForFvm;
+import org.aion.mcf.db.Repository;
 import org.aion.zero.impl.config.CfgFork;
 import org.aion.mcf.db.InternalVmType;
 import org.aion.mcf.db.RepositoryCache;
@@ -26,6 +27,7 @@ import org.aion.zero.impl.vm.common.TxNrgRule;
  * An implementation of the {@link IExternalStateForFvm} interface defined in the FVM.
  */
 public final class ExternalStateForFvm implements IExternalStateForFvm {
+    private final Repository<AccountState> sourceRepository;
     private final RepositoryCache<AccountState> repository;
     private final AionAddress miner;
     private final boolean isLocalCall;
@@ -37,8 +39,9 @@ public final class ExternalStateForFvm implements IExternalStateForFvm {
     private final FvmDataWord blockDifficulty;
     private final boolean isUnityForkEnabled;
 
-    public ExternalStateForFvm(RepositoryCache<AccountState> repository, AionAddress miner, FvmDataWord blockDifficulty, boolean isLocalCall, boolean allowNonceIncrement, boolean isFork040enabled, long blockNumber, long blockTimestamp, long blockEnergyLimit, boolean unityForkEnabled) {
-        this.repository = repository;
+    public ExternalStateForFvm(Repository<AccountState> repository, AionAddress miner, FvmDataWord blockDifficulty, boolean isLocalCall, boolean allowNonceIncrement, boolean isFork040enabled, long blockNumber, long blockTimestamp, long blockEnergyLimit, boolean unityForkEnabled) {
+        this.sourceRepository = repository;
+        this.repository = this.sourceRepository.startTracking();
         this.miner = miner;
         this.blockDifficulty = blockDifficulty;
         this.isLocalCall = isLocalCall;
@@ -53,7 +56,7 @@ public final class ExternalStateForFvm implements IExternalStateForFvm {
     /** Commits the changes in this world state to its parent world state. */
     @Override
     public void commit() {
-        this.repository.flush();
+        this.repository.flushTo(sourceRepository, true);
     }
 
     /**
@@ -79,7 +82,7 @@ public final class ExternalStateForFvm implements IExternalStateForFvm {
      */
     @Override
     public IExternalStateForFvm newChildExternalState() {
-        return new ExternalStateForFvm(this.repository.startTracking(), this.miner, this.blockDifficulty, this.isLocalCall, this.allowNonceIncrement, this.isFork040enabled, this.blockNumber, this.blockTimestamp, this.blockEnergyLimit, this.isUnityForkEnabled);
+        return new ExternalStateForFvm(this.repository, this.miner, this.blockDifficulty, this.isLocalCall, this.allowNonceIncrement, this.isFork040enabled, this.blockNumber, this.blockTimestamp, this.blockEnergyLimit, this.isUnityForkEnabled);
     }
 
     /**
