@@ -11,13 +11,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 import org.aion.evtmgr.IEvent;
 import org.aion.evtmgr.IEventMgr;
 import org.aion.evtmgr.impl.evt.EventConsensus;
@@ -32,7 +31,9 @@ import org.aion.util.conversions.Hex;
 import org.aion.util.types.ByteArrayWrapper;
 import org.aion.zero.impl.blockchain.AionBlockchainImpl;
 import org.aion.zero.impl.blockchain.ChainConfiguration;
+import org.aion.zero.impl.sync.msg.ReqBlocksBodies;
 import org.aion.zero.impl.sync.statistics.BlockType;
+import org.aion.zero.impl.sync.statistics.RequestType;
 import org.aion.zero.impl.types.BlockUtil;
 import org.aion.zero.impl.valid.BlockHeaderValidator;
 import org.apache.commons.collections4.map.LRUMap;
@@ -56,8 +57,6 @@ public final class SyncMgr {
 
     private SyncHeaderRequestManager syncHeaderRequestManager;
 
-    // store the downloaded headers from network
-    private final BlockingQueue<HeadersWrapper> downloadedHeaders = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     /**
      * This queue receives data from downloaded blocks. Its capacity is bounded inside the implementation that writes to it.
      */
@@ -71,9 +70,8 @@ public final class SyncMgr {
     private SyncStats stats;
     private AtomicBoolean start = new AtomicBoolean(true);
 
-    private ExecutorService syncExecutors = Executors.newFixedThreadPool(1);
+    private ExecutorService syncExecutors = Executors.newFixedThreadPool(2);
 
-    private Thread syncGb;
     private Thread syncIb;
     private Thread syncGs;
     private Thread syncSs = null;
@@ -99,17 +97,6 @@ public final class SyncMgr {
 
         syncHeaderRequestManager =  new SyncHeaderRequestManager(log, survey_log);
 
-        syncGb =
-            new Thread(
-                new TaskGetBodies(
-                    p2pMgr,
-                    start,
-                    downloadedHeaders,
-                    syncHeaderRequestManager,
-                    stats,
-                    log, survey_log),
-                "sync-gb");
-        syncGb.start();
         syncIb =
             new Thread(
                 new TaskImportBlocks(
@@ -224,7 +211,7 @@ public final class SyncMgr {
     }
 
     private void getHeaders(BigInteger _selfTd) {
-        if (sortedBlocks.size() >= QUEUE_CAPACITY || downloadedHeaders.size() >= QUEUE_CAPACITY) {
+        if (sortedBlocks.size() >= QUEUE_CAPACITY) {
             log.warn("Downloaded blocks queues are full. Stopped requesting headers.");
         } else {
             syncHeaderRequestManager.sendHeadersRequests(chain.getBestBlock().getNumber(), _selfTd, p2pMgr, stats);
@@ -289,12 +276,33 @@ public final class SyncMgr {
 
         // NOTE: the filtered headers is still continuous
         if (!filtered.isEmpty()) {
-            try {
-                downloadedHeaders.put(new HeadersWrapper(_nodeIdHashcode, _displayId, filtered));
-            } catch (InterruptedException e) {
-                log.error("Interrupted while attempting to add the headers from the network to the processing queue:", e);
-            }
+            syncExecutors.execute(() -> requestBodies(new HeadersWrapper(_nodeIdHashcode, _displayId, filtered), syncHeaderRequestManager, p2pMgr, stats));
         }
+    }
+
+    /**
+     * Requests the bodies associated to the given block headers.
+     */
+    @VisibleForTesting
+    static void requestBodies(final HeadersWrapper hw, SyncHeaderRequestManager syncHeaderRequestManager, IP2pMgr p2pMgr, SyncStats syncStats) {
+        Thread.currentThread().setName("sync-gb");
+        long startTime = System.nanoTime();
+        int idHash = hw.nodeId;
+        String displayId = hw.displayId;
+        List<BlockHeader> headers = hw.headers;
+
+        // save headers for matching with bodies
+        syncHeaderRequestManager.storeHeaders(idHash, hw);
+
+        // log bodies request before sending the request
+        log.debug("<get-bodies from-num={} to-num={} node={}>", headers.get(0).getNumber(), headers.get(headers.size() - 1).getNumber(), hw.displayId);
+
+        p2pMgr.send(idHash, displayId, new ReqBlocksBodies(headers.stream().map(k -> k.getHash()).collect(Collectors.toList())));
+        syncStats.updateTotalRequestsToPeer(displayId, RequestType.BODIES);
+        syncStats.updateRequestTime(displayId, System.nanoTime(), RequestType.BODIES);
+
+        long duration = System.nanoTime() - startTime;
+        survey_log.debug("TaskGetBodies: make request, duration = {} ns.", duration);
     }
 
     /**
@@ -372,7 +380,6 @@ public final class SyncMgr {
         start.set(false);
         shutdownAndAwaitTermination(syncExecutors);
 
-        interruptAndWait(syncGb, 10000);
         interruptAndWait(syncIb, 10000);
         interruptAndWait(syncGs, 10000);
         interruptAndWait(syncSs, 10000);
