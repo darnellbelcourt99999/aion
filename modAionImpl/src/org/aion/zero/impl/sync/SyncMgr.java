@@ -7,6 +7,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,7 @@ public final class SyncMgr {
 
     private static final Logger log = AionLoggerFactory.getLogger(LogEnum.SYNC.name());
     private static final Logger survey_log = AionLoggerFactory.getLogger(LogEnum.SURVEY.name());
+    private static final Logger p2pLog = AionLoggerFactory.getLogger(LogEnum.P2P.name());
 
     private final NetworkStatus networkStatus = new NetworkStatus();
 
@@ -75,7 +77,6 @@ public final class SyncMgr {
     private ScheduledExecutorService syncExecutors = Executors.newScheduledThreadPool(3);
 
     private Thread syncIb;
-    private Thread syncSs = null;
 
     private BlockHeaderValidator blockHeaderValidator;
     private volatile long timeUpdated = 0;
@@ -115,19 +116,7 @@ public final class SyncMgr {
         syncExecutors.scheduleWithFixedDelay(() -> getStatus(p2pMgr, stats), 0L, 2, TimeUnit.SECONDS);
 
         if (_showStatus) {
-            syncSs =
-                new Thread(
-                    new TaskShowStatus(
-                        start,
-                        INTERVAL_SHOW_STATUS,
-                        chain,
-                        networkStatus,
-                        stats,
-                        p2pMgr,
-                        showStatistics,
-                        AionLoggerFactory.getLogger(LogEnum.P2P.name())),
-                    "sync-ss");
-            syncSs.start();
+            syncExecutors.scheduleWithFixedDelay(() -> showStatus(chain, networkStatus, Collections.unmodifiableSet(new HashSet<>(showStatistics)), stats), 0, INTERVAL_SHOW_STATUS, TimeUnit.MILLISECONDS);
         }
 
         setupEventHandler();
@@ -146,6 +135,62 @@ public final class SyncMgr {
             syncStats.updateTotalRequestsToPeer(node.getIdShort(), RequestType.STATUS);
             syncStats.updateRequestTime(node.getIdShort(), System.nanoTime(), RequestType.STATUS);
         }
+    }
+
+    /**
+     * Display the current node status.
+     */
+    @VisibleForTesting
+    static void showStatus(AionBlockchainImpl chain, NetworkStatus networkStatus, Set<StatsType> showStatistics, SyncStats syncStats) {
+        Thread.currentThread().setName("sync-ss");
+        p2pLog.info(getStatus(chain, networkStatus, syncStats));
+
+        String requestedStats;
+        if (showStatistics.contains(StatsType.REQUESTS)) {
+            requestedStats = syncStats.dumpRequestStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.info(requestedStats);
+            }
+        }
+
+        if (showStatistics.contains(StatsType.SEEDS)) {
+            requestedStats = syncStats.dumpTopSeedsStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.info(requestedStats);
+            }
+        }
+
+        if (showStatistics.contains(StatsType.LEECHES)) {
+            requestedStats = syncStats.dumpTopLeechesStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.info(requestedStats);
+            }
+        }
+
+        if (showStatistics.contains(StatsType.RESPONSES)) {
+            requestedStats = syncStats.dumpResponseStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.info(requestedStats);
+            }
+        }
+
+        if (showStatistics.contains(StatsType.SYSTEMINFO)) {
+            requestedStats = syncStats.dumpSystemInfo();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.info(requestedStats);
+            }
+        }
+    }
+
+    private static String getStatus(AionBlockchainImpl chain, NetworkStatus networkStatus, SyncStats syncStats) {
+        Block selfBest = chain.getBestBlock();
+        String selfTd = selfBest.getTotalDifficulty().toString(10);
+
+        return "sync-status avg-import="
+                + String.format("%.2f", syncStats.getAvgBlocksPerSec()) + " b/s"
+                + " td=" + selfTd + "/" + networkStatus.getTargetTotalDiff().toString(10)
+                + " b-num=" + selfBest.getNumber() + "/" + networkStatus.getTargetBestBlockNumber()
+                + " b-hash=" + Hex.toHexString(chain.getBestBlockHash()) + "/" + networkStatus.getTargetBestBlockHash();
     }
 
     /**
@@ -393,11 +438,32 @@ public final class SyncMgr {
     }
 
     public synchronized void shutdown() {
+        if (p2pLog.isDebugEnabled()) {
+            // print all the gathered information before shutdown
+            p2pLog.debug(getStatus(chain, networkStatus, stats));
+
+            String requestedStats = stats.dumpRequestStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.debug(requestedStats);
+            }
+            requestedStats = stats.dumpTopSeedsStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.debug(requestedStats);
+            }
+            requestedStats = stats.dumpTopLeechesStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.debug(requestedStats);
+            }
+            requestedStats = stats.dumpResponseStats();
+            if (!requestedStats.isEmpty()) {
+                p2pLog.debug(requestedStats);
+            }
+        }
+
         start.set(false);
         shutdownAndAwaitTermination(syncExecutors);
 
         interruptAndWait(syncIb, 10000);
-        interruptAndWait(syncSs, 10000);
     }
 
     private void interruptAndWait(Thread t, long timeout) {
