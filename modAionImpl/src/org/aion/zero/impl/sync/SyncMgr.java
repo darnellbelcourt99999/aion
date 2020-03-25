@@ -12,11 +12,10 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import org.aion.evtmgr.IEvent;
 import org.aion.evtmgr.IEventMgr;
@@ -61,10 +60,6 @@ public final class SyncMgr {
 
     private SyncHeaderRequestManager syncHeaderRequestManager;
 
-    /**
-     * This queue receives data from downloaded blocks. Its capacity is bounded inside the implementation that writes to it.
-     */
-    private final PriorityBlockingQueue<BlocksWrapper> sortedBlocks = new PriorityBlockingQueue<>();
     // store the hashes of blocks which have been successfully imported
     private final Map<ByteArrayWrapper, Object> importedBlockHashes =
             Collections.synchronizedMap(new LRUMap<>(4096));
@@ -72,11 +67,9 @@ public final class SyncMgr {
     private IP2pMgr p2pMgr;
     private IEventMgr evtMgr;
     private SyncStats stats;
-    private AtomicBoolean start = new AtomicBoolean(true);
 
     private ScheduledExecutorService syncExecutors = Executors.newScheduledThreadPool(3);
-
-    private Thread syncIb;
+    private ExecutorService importExecutor = Executors.newSingleThreadExecutor();
 
     private BlockHeaderValidator blockHeaderValidator;
     private volatile long timeUpdated = 0;
@@ -99,21 +92,7 @@ public final class SyncMgr {
 
         syncHeaderRequestManager =  new SyncHeaderRequestManager(log, survey_log);
 
-        syncIb =
-            new Thread(
-                new TaskImportBlocks(
-                    log,
-                    survey_log,
-                    chain,
-                    start,
-                    stats,
-                    sortedBlocks,
-                    importedBlockHashes,
-                    syncHeaderRequestManager),
-                "sync-ib");
-        syncIb.start();
-
-        syncExecutors.scheduleWithFixedDelay(() -> getStatus(p2pMgr, stats), 0L, 2, TimeUnit.SECONDS);
+        syncExecutors.scheduleAtFixedRate(() -> getStatus(p2pMgr, stats), 0L, 2, TimeUnit.SECONDS);
 
         if (_showStatus) {
             syncExecutors.scheduleWithFixedDelay(() -> showStatus(chain, networkStatus, Collections.unmodifiableSet(new HashSet<>(showStatistics)), stats), 0, INTERVAL_SHOW_STATUS, TimeUnit.MILLISECONDS);
@@ -272,11 +251,12 @@ public final class SyncMgr {
     }
 
     private void getHeaders(BigInteger _selfTd) {
-        if (sortedBlocks.size() >= QUEUE_CAPACITY) {
-            log.warn("Downloaded blocks queues are full. Stopped requesting headers.");
-        } else {
+        // Using the same executor as imports ensures that the requests are sent only when the kernel is not busy importing blocks.
+        // Therefore the system will not be overwhelmed with responses it cannot currently handle.
+        importExecutor.execute(() -> {
+            Thread.currentThread().setName("sync-gh");
             syncHeaderRequestManager.sendHeadersRequests(chain.getBestBlock().getNumber(), _selfTd, p2pMgr, stats);
-        }
+        });
     }
 
     /**
@@ -404,30 +384,25 @@ public final class SyncMgr {
         log.debug("<assembled-blocks from={} size={} node={}>", blocks.get(0).getNumber(), blocks.size(), _displayId);
 
         // add batch
-        syncExecutors.execute(() -> filterBlocks(new BlocksWrapper(_nodeIdHashcode, _displayId, blocks), chain, sortedBlocks, stats));
+        syncExecutors.execute(() -> filterBlocks(new BlocksWrapper(_nodeIdHashcode, _displayId, blocks), chain, stats, importedBlockHashes, syncHeaderRequestManager, importExecutor));
     }
 
-    private static final int MIN_STORAGE_DIFF = SyncHeaderRequestManager.MIN_REQUEST_SIZE;
     /** @implNote Should be lower than {@link SyncHeaderRequestManager#MAX_BLOCK_DIFF}. */
-    private static final int MAX_STORAGE_DIFF = 200;
-    private static final int PREFERRED_QUEUE_SIZE = 60;
+    private static final int MAX_STORAGE_DIFF = 100;
 
     /**
      * Filters received blocks by delegating the ones far in the future to storage and delaying queue population when the predefined capacity is reached.
      */
-    private static void filterBlocks(final BlocksWrapper downloadedBlocks, AionBlockchainImpl chain, PriorityBlockingQueue<BlocksWrapper> sortedBlocks, SyncStats syncStats) {
+    private static void filterBlocks(final BlocksWrapper downloadedBlocks, AionBlockchainImpl chain, SyncStats syncStats, Map<ByteArrayWrapper, Object> importedBlockHashes, SyncHeaderRequestManager syncHeaderRequestManager, ExecutorService importExecutor) {
         Thread.currentThread().setName("sync-fb");
         long currentBest = chain.getBestBlock() == null ? 0 : chain.getBestBlock().getNumber();
         boolean isFarInFuture = downloadedBlocks.firstBlockNumber > currentBest + MAX_STORAGE_DIFF;
-        boolean isAtMaxCapacity = sortedBlocks.size() >= QUEUE_CAPACITY;
-        boolean isAtPreferredCapacity = (sortedBlocks.size() >= PREFERRED_QUEUE_SIZE) && (downloadedBlocks.firstBlockNumber > currentBest + MIN_STORAGE_DIFF);
 
-        if (isFarInFuture || isAtMaxCapacity || isAtPreferredCapacity) {
+        if (isFarInFuture) {
             int stored = chain.storePendingBlockRange(downloadedBlocks.blocks, log);
             syncStats.updatePeerBlocks(downloadedBlocks.displayId, stored, BlockType.STORED);
         } else {
-            sortedBlocks.put(downloadedBlocks);
-            log.debug("<import-status: sorted blocks size={}>", sortedBlocks.size());
+            importExecutor.execute(() -> TaskImportBlocks.importBlocks(chain, syncStats, downloadedBlocks, importedBlockHashes, syncHeaderRequestManager));
         }
     }
 
@@ -460,22 +435,8 @@ public final class SyncMgr {
             }
         }
 
-        start.set(false);
         shutdownAndAwaitTermination(syncExecutors);
-
-        interruptAndWait(syncIb, 10000);
-    }
-
-    private void interruptAndWait(Thread t, long timeout) {
-        if (t != null) {
-            log.info("Stopping thread: " + t.getName());
-            t.interrupt();
-            try {
-                t.join(timeout);
-            } catch (InterruptedException e) {
-                log.warn("Failed to stop " + t.getName());
-            }
-        }
+        shutdownAndAwaitTermination(importExecutor);
     }
 
     private void shutdownAndAwaitTermination(ExecutorService pool) {
