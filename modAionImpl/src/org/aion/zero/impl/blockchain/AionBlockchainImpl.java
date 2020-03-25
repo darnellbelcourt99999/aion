@@ -964,7 +964,7 @@ public class AionBlockchainImpl implements IAionBlockchain {
             for (Block block : blockRange) {
                 Pair<ImportResult, Long> result = tryToConnectWithTimedExecution(new BlockWrapper(block));
                 importResult = result.getLeft();
-                long importTime = result.getRight();
+                long importTime = TimeUnit.NANOSECONDS.toMillis(result.getRight());
 
                 // printing additional information when debug is enabled
                 SYNC_LOG.debug(
@@ -1005,6 +1005,9 @@ public class AionBlockchainImpl implements IAionBlockchain {
     private final static long TEN_SECOND_TO_NANO = TimeUnit.SECONDS.toNanos(10);
     private final static long SIXTY_SECOND_TO_MILLI = TimeUnit.SECONDS.toMillis(60);
 
+    /**
+     * @return the import result and the duration of the import in {@link TimeUnit#NANOSECONDS}.
+     */
     private Pair<ImportResult, Long> tryToConnectWithTimedExecution(final BlockWrapper blockWrapper) {
         long importTime = System.nanoTime();
         ImportResult importResult =
