@@ -17,9 +17,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.aion.p2p.Ctrl;
@@ -42,7 +42,7 @@ import org.slf4j.Logger;
 
 /** @author Chris p2p://{uuid}@{ip}:{port} */
 public final class P2pMgr implements IP2pMgr {
-    private static final int PERIOD_SHOW_STATUS = 10000;
+    private static final int PERIOD_STATUS = 10; // in seconds
     private static final int PERIOD_REQUEST_ACTIVE_NODES = 1000;
     private static final int PERIOD_UPNP_PORT_MAPPING = 3600000;
     private static final int TIMEOUT_MSG_READ = 10000;
@@ -69,7 +69,7 @@ public final class P2pMgr implements IP2pMgr {
 
     private ServerSocketChannel tcpServer;
     private Selector selector;
-    private ScheduledExecutorService scheduledWorkers;
+    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(3);
     private int errTolerance;
     /*
      * The value was chosen to be smaller than the limit for receiveMsgQue.
@@ -163,8 +163,6 @@ public final class P2pMgr implements IP2pMgr {
         try {
             selector = Selector.open();
 
-            scheduledWorkers = new ScheduledThreadPoolExecutor(2);
-
             tcpServer = ServerSocketChannel.open();
             tcpServer.configureBlocking(false);
             tcpServer.socket().setReuseAddress(true);
@@ -229,9 +227,7 @@ public final class P2pMgr implements IP2pMgr {
             }
 
             if (p2pLOG.isInfoEnabled()) {
-                Thread threadStatus = new Thread(getStatusInstance(), "p2p-ts");
-                threadStatus.setPriority(Thread.NORM_PRIORITY);
-                threadStatus.start();
+                scheduledWorkers.scheduleWithFixedDelay(() -> printStatus(nodeMgr, selfShortId, sendMsgQue, receiveMsgQue, p2pLOG, surveyLog), PERIOD_STATUS, PERIOD_STATUS, TimeUnit.SECONDS);
             }
 
             if (!syncSeedsOnly) {
@@ -297,9 +293,7 @@ public final class P2pMgr implements IP2pMgr {
     public void shutdown() {
         start.set(false);
 
-        if (scheduledWorkers != null) {
-            scheduledWorkers.shutdownNow();
-        }
+        scheduledWorkers.shutdownNow();
 
         for (List<Handler> hdrs : handlers.values()) {
             hdrs.forEach(Handler::shutDown);
@@ -478,8 +472,16 @@ public final class P2pMgr implements IP2pMgr {
         return new TaskReceive(p2pLOG, surveyLog, start, receiveMsgQue, handlers);
     }
 
-    private TaskStatus getStatusInstance() {
-        return new TaskStatus(p2pLOG, surveyLog, start, nodeMgr, selfShortId, sendMsgQue, receiveMsgQue);
+    private static void printStatus(INodeMgr nodeMgr, String selfShortId, BlockingQueue<MsgOut> sendMsgQue, BlockingQueue<MsgIn> receiveMsgQue, Logger p2pLOG, Logger surveyLog) {
+        Thread.currentThread().setName("p2p-status");
+        long startTime = System.nanoTime();
+        String status = nodeMgr.dumpNodeInfo(selfShortId, p2pLOG.isDebugEnabled());
+
+        p2pLOG.info(status);
+        p2pLOG.debug("receive queue[{}] send queue[{}]", receiveMsgQue.size(), sendMsgQue.size());
+
+        long duration = System.nanoTime() - startTime;
+        surveyLog.debug("TaskStatus: duration = {} ns.", duration);
     }
 
     private TaskClear getClearInstance() {
