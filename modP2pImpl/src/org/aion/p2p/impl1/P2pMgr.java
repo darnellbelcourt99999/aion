@@ -45,6 +45,7 @@ import org.slf4j.Logger;
 /** @author Chris p2p://{uuid}@{ip}:{port} */
 public final class P2pMgr implements IP2pMgr {
     private static final int PERIOD_STATUS = 10; // in seconds
+    private static final int PERIOD_CLEAR = 10; // in seconds
     private static final int PERIOD_REQUEST_ACTIVE_NODES = 1000;
     private static final int PERIOD_UPNP_PORT_MAPPING = 3600000;
     private static final int TIMEOUT_MSG_READ = 10000;
@@ -74,7 +75,7 @@ public final class P2pMgr implements IP2pMgr {
 
     private ServerSocketChannel tcpServer;
     private Selector selector;
-    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(5);
+    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(6);
     private int errTolerance;
     /*
      * The size limit was chosen taking into account that:
@@ -233,9 +234,7 @@ public final class P2pMgr implements IP2pMgr {
                         TimeUnit.MILLISECONDS);
             }
 
-            Thread thrdClear = new Thread(getClearInstance(), "p2p-clear");
-            thrdClear.setPriority(Thread.NORM_PRIORITY);
-            thrdClear.start();
+            scheduledWorkers.scheduleWithFixedDelay(() -> clearTimeoutPeers(nodeMgr), PERIOD_CLEAR, PERIOD_CLEAR, TimeUnit.SECONDS);
 
             Thread thrdConn = new Thread(getConnectPeersInstance(), "p2p-conn");
             thrdConn.setPriority(Thread.NORM_PRIORITY);
@@ -576,8 +575,9 @@ public final class P2pMgr implements IP2pMgr {
         surveyLog.debug("TaskStatus: duration = {} ns.", duration);
     }
 
-    private TaskClear getClearInstance() {
-        return new TaskClear(p2pLOG, nodeMgr, start);
+    private static void clearTimeoutPeers(final INodeMgr nodeMgr) {
+        Thread.currentThread().setName("p2p-clear");
+        nodeMgr.timeoutCheck(System.currentTimeMillis());
     }
 
     private TaskConnectPeers getConnectPeersInstance() {
