@@ -10,10 +10,10 @@ import org.aion.p2p.Header;
 import org.slf4j.Logger;
 
 /** @author chris */
-class ChannelBuffer {
+public class ChannelBuffer {
 
     byte[] body = null;
-    Lock lock = new ReentrantLock();
+    public Lock lock = new ReentrantLock();
     private Header header = null;
     // buffer for buffer remaining after NIO select read.
     private byte[] remainBuffer;
@@ -39,7 +39,7 @@ class ChannelBuffer {
         this.displayId = displayId;
     }
 
-    int getNodeIdHash() {
+    public int getNodeIdHash() {
         return nodeIdHash;
     }
 
@@ -48,11 +48,11 @@ class ChannelBuffer {
     }
 
     /** Indicates whether this channel is closed. */
-    boolean isClosed() {
+    public boolean isClosed() {
         return closed.get();
     }
 
-    void setClosed() {
+    public void setClosed() {
         this.closed.set(true);
     }
 
@@ -138,11 +138,11 @@ class ChannelBuffer {
         buf.get(body);
     }
 
-    void refreshHeader() {
+    public void refreshHeader() {
         header = null;
     }
 
-    void refreshBody() {
+    public void refreshBody() {
         body = null;
     }
 

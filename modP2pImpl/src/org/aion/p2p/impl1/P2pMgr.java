@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
@@ -20,7 +22,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.aion.p2p.Ctrl;
@@ -38,24 +39,20 @@ import org.aion.p2p.impl.comm.Node;
 import org.aion.p2p.impl.comm.NodeMgr;
 import org.aion.p2p.impl.zero.msg.ReqHandshake1;
 import org.aion.p2p.impl.zero.msg.ResHandshake1;
+import org.aion.p2p.impl1.tasks.ChannelBuffer;
 import org.aion.p2p.impl1.tasks.MsgIn;
-import org.aion.p2p.impl1.tasks.MsgOut;
 import org.aion.p2p.impl1.tasks.TaskClear;
 import org.aion.p2p.impl1.tasks.TaskConnectPeers;
 import org.aion.p2p.impl1.tasks.TaskInbound;
 import org.aion.p2p.impl1.tasks.TaskReceive;
-import org.aion.p2p.impl1.tasks.TaskSend;
 import org.apache.commons.collections4.map.LRUMap;
 import org.slf4j.Logger;
 
 /** @author Chris p2p://{uuid}@{ip}:{port} */
 public final class P2pMgr implements IP2pMgr {
-    private static final int PERIOD_SHOW_STATUS = 10000;
     private static final int PERIOD_REQUEST_ACTIVE_NODES = 1000;
     private static final int PERIOD_UPNP_PORT_MAPPING = 3600000;
     private static final int TIMEOUT_MSG_READ = 10000;
-
-    private static final int OFFER_TIMEOUT = 100; // in milliseconds
 
     public final Logger p2pLOG, surveyLog;
 
@@ -77,14 +74,8 @@ public final class P2pMgr implements IP2pMgr {
 
     private ServerSocketChannel tcpServer;
     private Selector selector;
-    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(2);
+    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(3);
     private int errTolerance;
-    /*
-     * The value was chosen to be smaller than the limit for receiveMsgQue.
-     * The size should be increased if we notice many warning logs that
-     * the queue has reached capacity during execution.
-     */
-    private BlockingQueue<MsgOut> sendMsgQue = new LinkedBlockingQueue<>(10_000);
     /*
      * The size limit was chosen taking into account that:
      * - in a 2G OOM heap dump the size of this queue reached close to 700_000;
@@ -216,10 +207,6 @@ public final class P2pMgr implements IP2pMgr {
                         });
             }
 
-            Thread thrdOut = new Thread(new TaskSend(p2pLOG, surveyLog, this, sendMsgQue, start, nodeMgr, selector), "p2p-out");
-            thrdOut.setPriority(Thread.MAX_PRIORITY);
-            thrdOut.start();
-
             for (int i = 0; i < WORKER; i++) {
                 Thread t = new Thread(getReceiveInstance(), "p2p-worker-" + i);
                 t.setPriority(Thread.NORM_PRIORITY);
@@ -235,7 +222,7 @@ public final class P2pMgr implements IP2pMgr {
             }
 
             if (p2pLOG.isInfoEnabled()) {
-                scheduledWorkers.scheduleWithFixedDelay(() -> printStatus(nodeMgr, selfShortId, sendMsgQue, receiveMsgQue, p2pLOG, surveyLog), PERIOD_STATUS_SECONDS, PERIOD_STATUS_SECONDS, TimeUnit.SECONDS);
+                scheduledWorkers.scheduleWithFixedDelay(() -> printStatus(nodeMgr, selfShortId, receiveMsgQue, p2pLOG, surveyLog), PERIOD_STATUS_SECONDS, PERIOD_STATUS_SECONDS, TimeUnit.SECONDS);
             }
 
             if (!syncSeedsOnly) {
@@ -262,13 +249,13 @@ public final class P2pMgr implements IP2pMgr {
 
     private static final int PERIOD_STATUS_SECONDS = 10;
 
-    private static void printStatus(INodeMgr nodeMgr, String selfShortId, BlockingQueue<MsgOut> sendMsgQue, BlockingQueue<MsgIn> receiveMsgQue, Logger p2pLOG, Logger surveyLog) {
+    private static void printStatus(INodeMgr nodeMgr, String selfShortId, BlockingQueue<MsgIn> receiveMsgQue, Logger p2pLOG, Logger surveyLog) {
         Thread.currentThread().setName("p2p-ts");
         long startTime = System.nanoTime();
         String status = nodeMgr.dumpNodeInfo(selfShortId, p2pLOG.isDebugEnabled());
 
         p2pLOG.info(status);
-        p2pLOG.debug("receive queue[{}] send queue[{}]", receiveMsgQue.size(), sendMsgQue.size());
+        p2pLOG.debug("receive queue[{}]", receiveMsgQue.size());
 
         long duration = System.nanoTime() - startTime;
         surveyLog.debug("TaskStatus: duration = {} ns.", duration);
@@ -305,13 +292,111 @@ public final class P2pMgr implements IP2pMgr {
     }
 
     public void send(int nodeId, String nodeDisplayId, final Msg message, Dest peerList) {
-        try {
-            boolean added = sendMsgQue.offer(new MsgOut(nodeId, nodeDisplayId, message, peerList), OFFER_TIMEOUT, TimeUnit.MILLISECONDS);
-            if (!added) {
-                p2pLOG.warn("Message not added to the send queue due to exceeded capacity: msg={} for node={}", message, nodeDisplayId);
+        scheduledWorkers.execute(() -> {
+            Thread.currentThread().setName("p2p-out");
+            long startTime = System.nanoTime();
+            process(nodeId, nodeDisplayId, message, peerList, System.nanoTime());
+            long duration = System.nanoTime() - startTime;
+            surveyLog.debug("TaskSend: process message, duration = {} ns.", duration);
+        });
+    }
+
+    // timeout for messages to be sent
+    private static final long WRITE_MSG_TIMEOUT = TimeUnit.MILLISECONDS.toNanos(5000);
+    private static final long MAX_BUFFER_WRITE_TIME = 1_000_000_000L;
+    private static final long MIN_TRACE_BUFFER_WRITE_TIME = 10_000_000L;
+
+    private void process(int nodeId, String nodeDisplayId, final Msg message, Dest peerList, long timestamp) {
+        // Discard message after the timeout period has passed.
+        long now = System.nanoTime();
+        if (now - timestamp > WRITE_MSG_TIMEOUT) {
+            p2pLOG.debug("timeout-msg to-node={} timestamp={}", nodeDisplayId, now);
+        } else {
+            INode node = null;
+            switch (peerList) {
+                case ACTIVE:
+                    node = nodeMgr.getActiveNode(nodeId);
+                    break;
+                case INBOUND:
+                    node = nodeMgr.getInboundNode(nodeId);
+                    break;
+                case OUTBOUND:
+                    node = nodeMgr.getOutboundNode(nodeId);
+                    break;
             }
-        } catch (InterruptedException e) {
-            p2pLOG.error("Interrupted while attempting to add the message to send to the processing queue:", e);
+
+            if (node == null) {
+                p2pLOG.debug("msg-{} -> {} node-not-exist", peerList.name(), nodeDisplayId);
+            } else {
+                SelectionKey sk = node.getChannel().keyFor(selector);
+                if (sk != null && sk.attachment() != null) {
+                    ChannelBuffer channelBuffer = (ChannelBuffer) sk.attachment();
+                    SocketChannel sc = node.getChannel();
+
+                    // reset allocated buffer and clear messages if the channel is closed
+                    if (channelBuffer.isClosed()) {
+                        channelBuffer.refreshHeader();
+                        channelBuffer.refreshBody();
+                        this.dropActive(channelBuffer.getNodeIdHash(), "close-already");
+                        return;
+                    } else {
+                        try {
+                            channelBuffer.lock.lock();
+
+                            // @warning header set len (body len) before header encode
+                            byte[] bodyBytes = message.encode();
+                            int bodyLen = bodyBytes == null ? 0 : bodyBytes.length;
+                            Header h = message.getHeader();
+                            h.setLen(bodyLen);
+                            byte[] headerBytes = h.encode();
+
+                            p2pLOG.trace("write id:{} {}-{}-{}", nodeDisplayId, h.getVer(), h.getCtrl(), h.getAction());
+
+                            ByteBuffer buf = ByteBuffer.allocate(headerBytes.length + bodyLen);
+                            buf.put(headerBytes);
+                            if (bodyBytes != null) {
+                                buf.put(bodyBytes);
+                            }
+                            buf.flip();
+
+                            long t1 = System.nanoTime(), t2;
+                            int wrote = 0;
+                            try {
+                                do {
+                                    int result = sc.write(buf);
+                                    wrote += result;
+
+                                    if (result == 0) {
+                                        // @Attention:  very important sleep , otherwise when NIO write buffer full,
+                                        // without sleep will hangup this thread.
+                                        Thread.sleep(0, 1);
+                                    }
+
+                                    t2 = System.nanoTime() - t1;
+                                } while (buf.hasRemaining() && (t2 < MAX_BUFFER_WRITE_TIME));
+
+                                if (t2 > MIN_TRACE_BUFFER_WRITE_TIME) {
+                                    p2pLOG.trace("msg write: id {} size {} time {} ms length {}", nodeDisplayId, wrote, t2, buf.array().length);
+                                }
+
+                            } catch (ClosedChannelException ex1) {
+                                p2pLOG.debug("closed-channel-exception node=" + nodeDisplayId, ex1);
+                                channelBuffer.setClosed();
+                            } catch (IOException ex2) {
+                                p2pLOG.debug("write-msg-io-exception node=" + nodeDisplayId + " headerBytes=" + headerBytes.length + " bodyLen=" + bodyLen + " time=" + (System.nanoTime() - t1) + "ns", ex2);
+
+                                if (ex2.getMessage().equals("Broken pipe")) {
+                                    channelBuffer.setClosed();
+                                }
+                            } catch (InterruptedException e) {
+                                p2pLOG.error("Interrupted while writing message to node=" + nodeDisplayId + ".", e);
+                            }
+                        } finally {
+                            channelBuffer.lock.unlock();
+                        }
+                    }
+                }
+            }
         }
     }
 
