@@ -41,7 +41,6 @@ import org.aion.p2p.impl.zero.msg.ReqHandshake1;
 import org.aion.p2p.impl.zero.msg.ResHandshake1;
 import org.aion.p2p.impl1.tasks.ChannelBuffer;
 import org.aion.p2p.impl1.tasks.MsgIn;
-import org.aion.p2p.impl1.tasks.TaskClear;
 import org.aion.p2p.impl1.tasks.TaskConnectPeers;
 import org.aion.p2p.impl1.tasks.TaskInbound;
 import org.aion.p2p.impl1.tasks.TaskReceive;
@@ -74,7 +73,7 @@ public final class P2pMgr implements IP2pMgr {
 
     private ServerSocketChannel tcpServer;
     private Selector selector;
-    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(3);
+    private ScheduledExecutorService scheduledWorkers = Executors.newScheduledThreadPool(4);
     private int errTolerance;
     /*
      * The size limit was chosen taking into account that:
@@ -233,9 +232,7 @@ public final class P2pMgr implements IP2pMgr {
                         TimeUnit.MILLISECONDS);
             }
 
-            Thread thrdClear = new Thread(getClearInstance(), "p2p-clear");
-            thrdClear.setPriority(Thread.NORM_PRIORITY);
-            thrdClear.start();
+            scheduledWorkers.scheduleWithFixedDelay(() -> clearTimeoutPeers(nodeMgr), PERIOD_CLEAR_SECONDS, PERIOD_CLEAR_SECONDS, TimeUnit.SECONDS);
 
             Thread thrdConn = new Thread(getConnectPeersInstance(), "p2p-conn");
             thrdConn.setPriority(Thread.NORM_PRIORITY);
@@ -247,6 +244,7 @@ public final class P2pMgr implements IP2pMgr {
         }
     }
 
+    private static final int PERIOD_CLEAR_SECONDS = 10;
     private static final int PERIOD_STATUS_SECONDS = 10;
 
     private static void printStatus(INodeMgr nodeMgr, String selfShortId, BlockingQueue<MsgIn> receiveMsgQue, Logger p2pLOG, Logger surveyLog) {
@@ -583,8 +581,9 @@ public final class P2pMgr implements IP2pMgr {
         return new TaskReceive(p2pLOG, surveyLog, start, receiveMsgQue, handlers);
     }
 
-    private TaskClear getClearInstance() {
-        return new TaskClear(p2pLOG, nodeMgr, start);
+    private void clearTimeoutPeers(final INodeMgr nodeMgr) {
+        Thread.currentThread().setName("p2p-clear");
+        nodeMgr.timeoutCheck(System.currentTimeMillis());
     }
 
     private TaskConnectPeers getConnectPeersInstance() {
