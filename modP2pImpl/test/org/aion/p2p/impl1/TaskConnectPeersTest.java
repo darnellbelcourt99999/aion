@@ -3,7 +3,6 @@ package org.aion.p2p.impl1;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -15,7 +14,6 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Random;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.aion.p2p.INode;
 import org.aion.p2p.INodeMgr;
@@ -35,8 +33,6 @@ public class TaskConnectPeersTest {
     @Mock private INodeMgr nodeMgr;
 
     @Mock private P2pMgr p2pMgr;
-
-    @Mock private BlockingQueue<MsgOut> sendMsgQue;
 
     @Mock private ReqHandshake1 rhs;
 
@@ -182,44 +178,6 @@ public class TaskConnectPeersTest {
         when(node.getIdShort()).thenReturn("1");
         when(nodeMgr.tempNodesTake()).thenReturn(node);
         when(node.getIfFromBootList()).thenReturn(true);
-
-        Thread.sleep(2000);
-
-        atb.set(false);
-        while (!t.getState().toString().equals("TERMINATED")) {
-            Thread.sleep(100);
-        }
-    }
-
-    @Test(timeout = 10_000)
-    public void testRunException() throws InterruptedException {
-        AtomicBoolean atb = new AtomicBoolean(true);
-        TaskConnectPeers tcp =
-                new TaskConnectPeers(p2pLOG, p2pMgr, atb, nodeMgr, 128, selector, rhs);
-        assertNotNull(tcp);
-
-        when(node.getIdHash()).thenReturn(1);
-        when(node.getPort()).thenReturn(port);
-        when(node.getIpStr()).thenReturn("127.0.0.1");
-        when(nodeMgr.notAtOutboundList(node.getIdHash())).thenReturn(true);
-        when(nodeMgr.notActiveNode(node.getIdHash())).thenReturn(true);
-
-        Thread t = new Thread(tcp);
-        t.start();
-        assertTrue(t.isAlive());
-        Thread.sleep(10);
-
-        // should see the loop continue every sec
-        Thread.sleep(1000);
-
-        when(nodeMgr.activeNodesSize()).thenReturn(127);
-        // should see the loop continue every sec due to null node been taken
-        Thread.sleep(1000);
-
-        when(node.getIdShort()).thenReturn("1");
-        when(nodeMgr.tempNodesTake()).thenReturn(node);
-        when(node.getIfFromBootList()).thenReturn(true);
-        when(sendMsgQue.offer(any(MsgOut.class))).thenThrow(new NullPointerException("exception"));
 
         Thread.sleep(2000);
 
