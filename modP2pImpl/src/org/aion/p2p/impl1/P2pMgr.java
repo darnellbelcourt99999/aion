@@ -41,7 +41,6 @@ import org.aion.p2p.impl.zero.msg.ReqHandshake1;
 import org.aion.p2p.impl.zero.msg.ResHandshake1;
 import org.aion.p2p.impl1.tasks.ChannelBuffer;
 import org.aion.p2p.impl1.tasks.MsgIn;
-import org.aion.p2p.impl1.tasks.TaskConnectPeers;
 import org.aion.p2p.impl1.tasks.TaskInbound;
 import org.aion.p2p.impl1.tasks.TaskReceive;
 import org.apache.commons.collections4.map.LRUMap;
@@ -233,10 +232,7 @@ public final class P2pMgr implements IP2pMgr {
             }
 
             scheduledWorkers.scheduleWithFixedDelay(() -> clearTimeoutPeers(nodeMgr), PERIOD_CLEAR_SECONDS, PERIOD_CLEAR_SECONDS, TimeUnit.SECONDS);
-
-            Thread thrdConn = new Thread(getConnectPeersInstance(), "p2p-conn");
-            thrdConn.setPriority(Thread.NORM_PRIORITY);
-            thrdConn.start();
+            scheduledWorkers.scheduleWithFixedDelay(() -> connectPeers(this, nodeMgr, maxActiveNodes, selector, cachedReqHandshake1, p2pLOG), PERIOD_CONNECT_OUTBOUND, PERIOD_CONNECT_OUTBOUND, TimeUnit.MILLISECONDS);
         } catch (SocketException e) {
             p2pLOG.error("tcp-server-socket-exception.", e);
         } catch (IOException e) {
@@ -586,15 +582,97 @@ public final class P2pMgr implements IP2pMgr {
         nodeMgr.timeoutCheck(System.currentTimeMillis());
     }
 
-    private TaskConnectPeers getConnectPeersInstance() {
-        return new TaskConnectPeers(
-                p2pLOG,
-                this,
-                this.start,
-                this.nodeMgr,
-                this.maxActiveNodes,
-                this.selector,
-                cachedReqHandshake1);
+    private static final int PERIOD_CONNECT_OUTBOUND = 1000;
+    private static final int TIMEOUT_OUTBOUND_CONNECT = 10000;
+
+    private static void connectPeers(P2pMgr mgr, INodeMgr nodeMgr, int maxActiveNodes, Selector selector, ReqHandshake1 cachedReqHS, Logger p2pLOG) {
+        Thread.currentThread().setName("p2p-tcp");
+
+        INode node;
+        try {
+            if (nodeMgr.activeNodesSize() >= maxActiveNodes) {
+                p2pLOG.warn("tcp-connect-peer pass max-active-nodes.");
+                return;
+            }
+
+            node = nodeMgr.tempNodesTake();
+            if (node == null) {
+                p2pLOG.debug("no temp node can take.");
+                return;
+            }
+
+            if (node.getIfFromBootList()) {
+                nodeMgr.addTempNode(node);
+            }
+        } catch (Exception e) {
+            p2pLOG.debug("tcp-Exception.", e);
+            return;
+        }
+        int nodeIdHash = node.getIdHash();
+        if (nodeMgr.notAtOutboundList(nodeIdHash) && nodeMgr.notActiveNode(nodeIdHash)) {
+            int _port = node.getPort();
+            SocketChannel channel = null;
+            try {
+                channel = SocketChannel.open();
+                channel.socket().connect(new InetSocketAddress(node.getIpStr(), _port), TIMEOUT_OUTBOUND_CONNECT);
+                mgr.configChannel(channel);
+
+                if (channel.isConnected()) {
+                    if (p2pLOG.isDebugEnabled()) {
+                        p2pLOG.debug(
+                                "success-connect node-id={} ip={}",
+                                node.getIdShort(),
+                                node.getIpStr());
+                    }
+
+                    channel.configureBlocking(false);
+                    SelectionKey sk = channel.register(selector, SelectionKey.OP_READ);
+                    ChannelBuffer rb = new ChannelBuffer(p2pLOG);
+                    rb.setDisplayId(node.getIdShort());
+                    rb.setNodeIdHash(nodeIdHash);
+                    sk.attach(rb);
+
+                    node.refreshTimestamp();
+                    node.setChannel(channel);
+                    nodeMgr.addOutboundNode(node);
+
+                    if (p2pLOG.isDebugEnabled()) {
+                        p2pLOG.debug(
+                                "prepare-request-handshake -> id={} ip={}",
+                                node.getIdShort(),
+                                node.getIpStr());
+                    }
+
+                    mgr.send(node.getIdHash(), node.getIdShort(), cachedReqHS, Dest.OUTBOUND);
+                } else {
+                    if (p2pLOG.isDebugEnabled()) {
+                        p2pLOG.debug(
+                                "fail-connect node-id -> id={} ip={}",
+                                node.getIdShort(),
+                                node.getIpStr());
+                    }
+
+                    channel.close();
+                    // node.peerMetric.incFailedCount();
+                }
+            } catch (Exception e) {
+                if (p2pLOG.isDebugEnabled()) {
+                    p2pLOG.debug("connect-outbound exception -> id=" + node.getIdShort() + " ip=" + node.getIpStr(), e);
+                }
+
+                if (p2pLOG.isTraceEnabled()) {
+                    p2pLOG.trace("close channel {}", node.toString());
+                }
+
+                if (channel != null) {
+                    try {
+                        channel.close();
+                    } catch (IOException e1) {
+                        p2pLOG.debug("TaskConnectPeers close exception.", e1);
+                    }
+                }
+            }
+        }
     }
 
     private ReqHandshake1 getReqHandshake1Instance(List<Short> versions) {

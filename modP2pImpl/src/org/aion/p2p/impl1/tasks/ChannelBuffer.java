@@ -27,7 +27,7 @@ public class ChannelBuffer {
 
     private final Logger p2pLOG;
 
-    ChannelBuffer(final Logger p2pLOG) {
+    public ChannelBuffer(final Logger p2pLOG) {
         this.p2pLOG = p2pLOG;
     }
 
@@ -35,7 +35,7 @@ public class ChannelBuffer {
         return displayId;
     }
 
-    void setDisplayId(String displayId) {
+    public void setDisplayId(String displayId) {
         this.displayId = displayId;
     }
 
@@ -43,7 +43,7 @@ public class ChannelBuffer {
         return nodeIdHash;
     }
 
-    void setNodeIdHash(int nodeIdHash) {
+    public void setNodeIdHash(int nodeIdHash) {
         this.nodeIdHash = nodeIdHash;
     }
 
